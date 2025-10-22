@@ -61,4 +61,43 @@ watch:
             fi; \
         fi
 
-.PHONY: all build run test clean watch docker-run docker-down itest
+# Database Migration Commands
+# Requires: DATABASE_URL environment variable
+# Example: export DATABASE_URL="postgres://user:password@localhost:5432/passos?sslmode=disable"
+
+migrate-up:
+	@echo "Running migrations..."
+	@migrate -path internal/database/migrations -database "$(DATABASE_URL)" up
+
+migrate-down:
+	@echo "Rolling back last migration..."
+	@migrate -path internal/database/migrations -database "$(DATABASE_URL)" down 1
+
+migrate-down-all:
+	@echo "Rolling back all migrations..."
+	@migrate -path internal/database/migrations -database "$(DATABASE_URL)" down
+
+migrate-force:
+	@echo "Forcing migration version to $(VERSION)..."
+	@migrate -path internal/database/migrations -database "$(DATABASE_URL)" force $(VERSION)
+
+migrate-version:
+	@echo "Current migration version:"
+	@migrate -path internal/database/migrations -database "$(DATABASE_URL)" version
+
+migrate-create:
+	@echo "Creating migration $(NAME)..."
+	@migrate create -ext sql -dir internal/database/migrations -seq $(NAME)
+
+migrate-goto:
+	@echo "Migrating to version $(VERSION)..."
+	@migrate -path internal/database/migrations -database "$(DATABASE_URL)" goto $(VERSION)
+
+# SQLc commands
+sqlc-generate:
+	@echo "Generating sqlc code..."
+	@sqlc generate
+
+.PHONY: all build run test clean watch docker-run docker-down itest \
+	migrate-up migrate-down migrate-down-all migrate-force migrate-version \
+	migrate-create migrate-goto sqlc-generate
