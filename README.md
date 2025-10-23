@@ -67,16 +67,15 @@ make migrate-create NAME=add_feature  # Create new migration
 - [PassOS: Data Model](https://www.notion.so/PassOS-Data-Model-28e65c634a888031a9b9d1f7a48ea25c?pvs=21)
 - [PassOS Architecture](https://www.notion.so/PassOS-Architecture-29365c634a8880929a38ed9025a1b273?pvs=21)
 
-## Arquitectura y estructura de carpetas
+## Architecture
 
-La aplicación mantiene una arquitectura por capas que facilita el crecimiento del proyecto y la sustitución de dependencias. La siguiente tabla resume la correspondencia entre la estructura inicial y la distribución actual:
+The project follows a layered architecture with clear separation of concerns:
 
-| Capa | Estructura original | Estructura actual | Descripción |
-|------|---------------------|-------------------|-------------|
-| Transporte HTTP | `internal/server` | `internal/http` | Gestiona rutas, middlewares y controladores HTTP.
-| Servicios de dominio | _N/A_ | `internal/service` | Define la lógica de aplicación reutilizable (p. ej. `HealthService`). |
-| Contenedor/DI | _N/A_ | `internal/container` | Orquesta la inicialización de dependencias (logger, base de datos, servicios) y expone constructores para la capa HTTP. |
-| Utilidades compartidas | _N/A_ | `internal/pkg/errors`, `internal/pkg/logger` | Puntos de extensión comunes para manejo de errores y logging. |
-| Acceso a datos | `internal/database/query` | `internal/database/queries` | Contiene las consultas SQL utilizadas por SQLc y el acceso a datos. |
+- **HTTP Layer** (`internal/http`): Handlers, routes, and middleware
+- **Service Layer** (`internal/service`): Business logic and orchestration  
+- **Repository Layer** (`internal/repository`): Data access with SQLc-generated code
+- **Database Layer** (`internal/database`): Migrations and SQL queries
 
-El ejecutable (`cmd/api`) construye el contenedor de dependencias y obtiene desde allí el servidor HTTP configurado. Este diseño permite ubicar nuevas funcionalidades en la capa de servicios y exponerlas mediante adaptadores HTTP sin acoplar la lógica de dominio a los detalles de transporte.
+The main application (`cmd/api`) initializes dependencies through a container and starts the HTTP server. This design allows adding new features in the service layer and exposing them via HTTP adapters without coupling domain logic to transport details.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed documentation.
