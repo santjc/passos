@@ -199,20 +199,60 @@ func (s *ProductService) GetProduct(ctx context.Context, id uuid.UUID) (*reposit
 
 **When to Use DTOs**:
 
-Use SQLc models directly for:
-- Simple CRUD operations
-- Single-table queries
-- List operations
+**Critical Design Decision**: While SQLc models can technically be serialized directly to JSON, this approach couples the public API contract to the internal database schema, making it difficult to evolve the database without breaking the API.
 
-Create custom DTOs only when:
-- Request validation requires custom structure
-- Response needs data transformation
-- Combining multiple models into a single response
-- OCTO-specific response formats
-- Hiding internal fields
+**Recommended Approach**:
 
-**Example Handler**:
+Always use DTOs as a contract layer between the API and internal models:
+
+**Response DTOs** (Always):
+- Provide stable API contracts independent of DB schema
+- Allow DB schema evolution without breaking changes
+- Hide internal implementation details (`pgtype.Text`, nullable wrappers)
+- Enable API versioning (v1, v2) with different DTOs pointing to same DB
+- Support OCTO-specific formats without modifying database
+
+**Request DTOs** (Always):
+- Validate and sanitize user input
+- Provide clear API documentation
+- Prevent injection of unexpected fields
+- Allow business-level validation separate from DB constraints
+
+**Direct SQLc Model Usage** (Internal Only):
+- Between Repository and Service layers
+- Internal service-to-service communication
+- Background jobs and internal processes
+- Testing and development tools
+
+**Example Handler with DTOs**:
 ```go
+// internal/http/dto/product.go
+type ProductResponse struct {
+    ID                  string `json:"id"`
+    InternalName        string `json:"internalName"`
+    Locale              string `json:"locale"`
+    TimeZone            string `json:"timeZone"`
+    AllowFreesale       bool   `json:"allowFreesale"`
+    InstantConfirmation bool   `json:"instantConfirmation"`
+    InstantDelivery     bool   `json:"instantDelivery"`
+    CreatedAt           string `json:"createdAt"`
+    UpdatedAt           string `json:"updatedAt"`
+}
+
+func ToProductResponse(p *repository.Product) *ProductResponse {
+    return &ProductResponse{
+        ID:                  p.ID.String(),
+        InternalName:        p.InternalName,
+        Locale:              p.Locale,
+        TimeZone:            p.TimeZone,
+        AllowFreesale:       p.AllowFreesale,
+        InstantConfirmation: p.InstantConfirmation,
+        InstantDelivery:     p.InstantDelivery,
+        CreatedAt:           p.CreatedAt.Format(time.RFC3339),
+        UpdatedAt:           p.UpdatedAt.Format(time.RFC3339),
+    }
+}
+
 // internal/http/handler/product_handler.go
 type ProductHandler struct {
     productService *service.ProductService
@@ -235,8 +275,9 @@ func (h *ProductHandler) GetProduct(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    // SQLc model serializes directly to JSON
-    respondJSON(w, http.StatusOK, product)
+    // Convert internal model to API response DTO
+    response := dto.ToProductResponse(product)
+    respondJSON(w, http.StatusOK, response)
 }
 ```
 
@@ -676,6 +717,270 @@ func AuthMiddleware(next http.Handler) http.Handler {
 }
 ```
 
+## API Contract vs Internal Models
+
+### The DTO Layer Rationale
+
+One of the most critical architectural decisions is maintaining a clear separation between the public API contract (DTOs) and internal data models (SQLc-generated structs).
+
+### Why DTOs are Essential
+
+**1. API Stability**
+```go
+// Database schema can change
+ALTER TABLE product ADD COLUMN new_internal_field TEXT;
+ALTER TABLE product RENAME COLUMN time_zone TO timezone;
+
+// But API contract remains stable
+type ProductResponse struct {
+    ID       string `json:"id"`
+    TimeZone string `json:"timeZone"`  // Still camelCase, same field name
+    // new_internal_field is NOT exposed
+}
+```
+
+**2. Database Evolution**
+```go
+// Version 1: Simple structure
+type Product struct {
+    Name string
+}
+
+// Version 2: Normalized structure (breaking change in DB)
+type Product struct {
+    ProductContentID uuid.UUID
+}
+type ProductContent struct {
+    Name string
+}
+
+// But API stays the same
+type ProductResponse struct {
+    Name string `json:"name"`  // Populated from ProductContent now
+}
+```
+
+**3. Type Safety for Clients**
+```go
+// Bad: Exposing internal types
+type BadResponse struct {
+    ID        uuid.UUID          `json:"id"`           // Clients must handle UUID
+    UpdatedAt pgtype.Timestamptz `json:"updatedAt"`    // Clients must handle pgtype
+    Notes     pgtype.Text        `json:"notes"`        // Nullable wrapper exposed
+}
+
+// Good: Clean API types
+type GoodResponse struct {
+    ID        string  `json:"id"`           // Simple string
+    UpdatedAt string  `json:"updatedAt"`    // ISO 8601 string
+    Notes     *string `json:"notes"`        // Native Go nullable
+}
+```
+
+**4. API Versioning**
+```go
+// v1 API
+type ProductResponseV1 struct {
+    ID   string `json:"id"`
+    Name string `json:"name"`
+}
+
+// v2 API - different format, same database
+type ProductResponseV2 struct {
+    ProductID   string          `json:"productId"`    // Field renamed
+    ProductInfo ProductInfoV2   `json:"productInfo"`  // Nested structure
+}
+
+// Both map from the same repository.Product
+```
+
+**5. OCTO Compliance**
+```go
+// OCTO requires specific formats
+type OCTOProductResponse struct {
+    ID               string              `json:"id"`
+    InternalName     string              `json:"internalName"`
+    Reference        string              `json:"reference"`
+    Locale           string              `json:"locale"`
+    TimeZone         string              `json:"timeZone"`
+    AllowFreesale    bool                `json:"allowFreesale"`
+    AvailabilityType string              `json:"availabilityType"`
+    Options          []OCTOOptionSummary `json:"options"`
+    // OCTO-specific fields that don't exist in DB
+    SupplierID       string              `json:"supplierId"`
+    Currency         string              `json:"currency"`
+}
+
+// Map from internal models with additional logic
+func ToOCTOProductResponse(p *repository.Product, opts []repository.Option) *OCTOProductResponse {
+    return &OCTOProductResponse{
+        ID:               p.ID.String(),
+        InternalName:     p.InternalName,
+        // ... map fields
+        SupplierID:       "PASSOS", // Business logic
+        Currency:         determineCurrency(p.Locale),
+        Options:          mapOptions(opts),
+    }
+}
+```
+
+### DTO Best Practices
+
+**1. Keep DTOs Simple**
+```go
+// Good: Simple, flat structure
+type BookingResponse struct {
+    ID            string `json:"id"`
+    Status        string `json:"status"`
+    ProductName   string `json:"productName"`
+    ContactEmail  string `json:"contactEmail"`
+    TotalAmount   int    `json:"totalAmount"`
+    Currency      string `json:"currency"`
+}
+
+// Avoid: Exposing internal complexity
+type BadBookingResponse struct {
+    Booking repository.Booking           // Entire DB model
+    Product repository.Product           // Entire DB model
+    Contact repository.Contact           // Entire DB model
+}
+```
+
+**2. Use Consistent Naming**
+```go
+// Consistent API naming conventions
+type ProductResponse struct {
+    ID        string `json:"id"`           // Not "productId"
+    Name      string `json:"name"`         // Not "productName"
+    CreatedAt string `json:"createdAt"`    // ISO 8601
+}
+```
+
+**3. Handle Nulls Appropriately**
+```go
+// Convert pgtype nullables to Go pointers
+func ToProductResponse(p *repository.Product) *ProductResponse {
+    var reference *string
+    if p.Reference.Valid {
+        reference = &p.Reference.String
+    }
+    
+    return &ProductResponse{
+        ID:        p.ID.String(),
+        Reference: reference,  // nil if not present
+    }
+}
+```
+
+**4. Validate Input DTOs**
+```go
+type CreateProductRequest struct {
+    InternalName string `json:"internalName" validate:"required,min=3,max=100"`
+    Locale       string `json:"locale" validate:"required,iso639_1"`
+    TimeZone     string `json:"timeZone" validate:"required,timezone"`
+}
+
+func (r *CreateProductRequest) Validate() error {
+    // Business-level validation
+    if !isValidLocale(r.Locale) {
+        return errors.New("unsupported locale")
+    }
+    return nil
+}
+```
+
+### Mapping Strategies
+
+**1. Simple Mappers**
+```go
+func ToProductResponse(p *repository.Product) *ProductResponse {
+    return &ProductResponse{
+        ID:           p.ID.String(),
+        InternalName: p.InternalName,
+        Locale:       p.Locale,
+        CreatedAt:    p.CreatedAt.Format(time.RFC3339),
+    }
+}
+```
+
+**2. Complex Mappers with Aggregation**
+```go
+func ToBookingDetailResponse(
+    b *repository.Booking,
+    p *repository.Product,
+    c *repository.Contact,
+    items []repository.UnitItem,
+) *BookingDetailResponse {
+    return &BookingDetailResponse{
+        ID:          b.UUID.String(),
+        Status:      string(b.Status),
+        Product:     ToProductSummary(p),
+        Contact:     ToContactInfo(c),
+        Items:       mapUnitItems(items),
+        TotalAmount: calculateTotal(items),
+    }
+}
+```
+
+**3. Batch Mappers**
+```go
+func ToProductListResponse(products []repository.Product) []ProductSummaryResponse {
+    result := make([]ProductSummaryResponse, len(products))
+    for i, p := range products {
+        result[i] = *ToProductSummary(&p)
+    }
+    return result
+}
+```
+
+### Performance Considerations
+
+**1. Avoid N+1 Queries**
+```go
+// Bad: N+1 query problem
+func (s *ProductService) GetProductsWithOptions(ctx context.Context) ([]*ProductWithOptionsDTO, error) {
+    products, _ := s.productRepo.List(ctx)
+    
+    result := make([]*ProductWithOptionsDTO, len(products))
+    for i, p := range products {
+        options, _ := s.optionRepo.GetByProductID(ctx, p.ID) // N queries!
+        result[i] = ToProductWithOptionsDTO(&p, options)
+    }
+    return result, nil
+}
+
+// Good: Single query with JOIN
+func (s *ProductService) GetProductsWithOptions(ctx context.Context) ([]*ProductWithOptionsDTO, error) {
+    // Use SQLc query with JOIN
+    rows, _ := s.queries.GetProductsWithOptions(ctx)
+    return mapToProductWithOptionsDTO(rows), nil
+}
+```
+
+**2. Lazy Loading in DTOs**
+```go
+type ProductDetailResponse struct {
+    ID      string                `json:"id"`
+    Name    string                `json:"name"`
+    Options []OptionSummary       `json:"options"`
+    Stats   *ProductStats         `json:"stats,omitempty"` // Only if requested
+}
+
+func (h *ProductHandler) GetProduct(w http.ResponseWriter, r *http.Request) {
+    includeStats := r.URL.Query().Get("includeStats") == "true"
+    
+    product, _ := h.service.GetProduct(ctx, id)
+    response := dto.ToProductResponse(product)
+    
+    if includeStats {
+        stats, _ := h.service.GetProductStats(ctx, id)
+        response.Stats = dto.ToProductStatsDTO(stats)
+    }
+    
+    respondJSON(w, http.StatusOK, response)
+}
+```
+
 ## OCTO Compliance
 
 The architecture supports OCTO (Open Connectivity for Tourism Operations) compliance:
@@ -745,14 +1050,18 @@ LOG_LEVEL=info
 
 ## Best Practices
 
-1. **Keep Queries Simple**: Write clear, readable SQL in separate files
-2. **Use Transactions**: Wrap multi-step operations in database transactions
-3. **Validate Early**: Validate input at the handler layer
-4. **Handle Nulls Properly**: Use pgtype for nullable database fields
-5. **Write Tests**: Maintain high test coverage across all layers
-6. **Document APIs**: Use OpenAPI/Swagger for API documentation
-7. **Version APIs**: Use versioned endpoints (/api/v1/...)
-8. **Monitor Performance**: Track query performance and optimize as needed
+1. **Always Use DTOs for Public APIs**: Never expose SQLc models directly in HTTP responses to maintain API stability
+2. **Keep Queries Simple**: Write clear, readable SQL in separate files organized by domain
+3. **Use Transactions**: Wrap multi-step operations in database transactions
+4. **Validate Early**: Validate input at the handler layer using request DTOs
+5. **Handle Nulls Properly**: Use pgtype internally, convert to Go pointers in DTOs
+6. **Separate Concerns**: SQLc models for data layer, DTOs for API layer
+7. **Write Tests**: Maintain high test coverage across all layers
+8. **Document APIs**: Use OpenAPI/Swagger for API documentation with DTO definitions
+9. **Version APIs**: Use versioned endpoints (/api/v1/) with version-specific DTOs
+10. **Monitor Performance**: Track query performance and optimize as needed
+11. **Use Mapper Functions**: Create explicit mapper functions (ToXXXResponse) for clarity
+12. **Plan for Evolution**: Design DTOs with future changes in mind
 
 ## Future Enhancements
 
@@ -776,6 +1085,73 @@ When contributing to the codebase:
 5. Maintain separation of concerns across layers
 6. Follow Go best practices and idioms
 
+## Key Architectural Decisions
+
+### Decision 1: DTO Layer for All Public APIs
+
+**Decision**: Always use DTOs as the contract layer between public APIs and internal models, even when SQLc models could technically be serialized directly.
+
+**Rationale**:
+- Prevents coupling of public API to internal database schema
+- Enables independent evolution of database and API
+- Provides stable contracts for API consumers
+- Facilitates API versioning (v1, v2, etc.)
+- Hides internal implementation details
+- Supports OCTO compliance with format-specific responses
+
+**Trade-offs**:
+- Additional code for DTOs and mappers
+- Slight performance overhead for mapping
+- More initial development time
+
+**Benefits**:
+- Long-term maintainability and flexibility
+- Breaking changes in database don't break API
+- Clean separation of concerns
+- Professional API design
+- Easier to document and version
+
+### Decision 2: SQLc for Type-Safe Data Access
+
+**Decision**: Use SQLc to generate type-safe Go code from SQL queries instead of ORM or manual SQL.
+
+**Rationale**:
+- Maintains SQL as first-class citizen
+- Zero runtime overhead (no reflection)
+- Compile-time type safety
+- Database schema as single source of truth
+- Excellent performance
+
+**Trade-offs**:
+- Requires code generation step
+- Less abstraction than ORMs
+- Need to write SQL manually
+
+**Benefits**:
+- Performance and type safety
+- Clear and explicit queries
+- Easy to optimize
+- Great for complex queries
+
+### Decision 3: Repository Pattern with Interfaces
+
+**Decision**: Use repository interfaces for dependency injection and testing, even though SQLc generates the implementations.
+
+**Rationale**:
+- Enables dependency injection
+- Facilitates unit testing with mocks
+- Clear contracts between layers
+- Flexibility to change implementations
+
+**Trade-offs**:
+- Additional interface definitions
+- One more layer of abstraction
+
+**Benefits**:
+- Testable code
+- Loose coupling
+- Clean architecture principles
+
 ## References
 
 - [SQLc Documentation](https://docs.sqlc.dev/)
@@ -783,9 +1159,14 @@ When contributing to the codebase:
 - [Chi Router](https://github.com/go-chi/chi)
 - [Repository Pattern](https://martinfowler.com/eaaCatalog/repository.html)
 - [OCTO Specification](https://octospec.com/)
+- [API Design Best Practices](https://restfulapi.net/)
 
 ---
 
-**Last Updated**: 2025
-**Architecture Version**: 1.0
+**Last Updated**: 2025-01-23
+**Architecture Version**: 1.1
+
+**Changelog**:
+- v1.1: Added critical section on DTO layer rationale and API contract separation
+- v1.0: Initial architecture documentation
 
