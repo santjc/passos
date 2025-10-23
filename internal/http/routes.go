@@ -1,8 +1,7 @@
-package server
+package http
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -12,6 +11,8 @@ import (
 
 func (s *Server) RegisterRoutes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 
 	r.Use(cors.Handler(cors.Options{
@@ -23,25 +24,40 @@ func (s *Server) RegisterRoutes() http.Handler {
 	}))
 
 	r.Get("/", s.HelloWorldHandler)
-
 	r.Get("/health", s.healthHandler)
 
 	return r
 }
 
 func (s *Server) HelloWorldHandler(w http.ResponseWriter, r *http.Request) {
-	resp := make(map[string]string)
-	resp["message"] = "Hello World"
+	resp := map[string]string{"message": "Hello World"}
 
 	jsonResp, err := json.Marshal(resp)
 	if err != nil {
-		log.Fatalf("error handling JSON marshal. Err: %v", err)
+		if s.logger != nil {
+			s.logger.Errorf("error handling JSON marshal: %v", err)
+		}
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
 	}
 
 	_, _ = w.Write(jsonResp)
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
-	jsonResp, _ := json.Marshal(s.db.Health())
+	status := map[string]string{"status": "unknown"}
+	if s.healthService != nil {
+		status = s.healthService.Status()
+	}
+
+	jsonResp, err := json.Marshal(status)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Errorf("error handling health response: %v", err)
+		}
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
 	_, _ = w.Write(jsonResp)
 }
